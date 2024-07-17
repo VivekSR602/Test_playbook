@@ -1,0 +1,125 @@
+---
+- name: Manage AD User
+  hosts: all
+  gather_facts: yes
+
+ 
+  tasks:
+
+    - name: Verify the AD domain exists
+      win_shell:
+        _raw_params: |
+          Import-Module ActiveDirectory
+          Get-ADDomain -Identity "{{ ad_domain }}"
+        args:
+          executable: powershell
+      register: ad_domain_check
+      changed_when: false
+      failed_when: false
+      ignore_errors: true
+
+    - name: Print error message and end play if the AD domain does not exist
+      block:
+        - name: Print error message
+          debug:
+            msg: "AD domain doesn't exist."
+        - name: End play
+          meta: end_play
+      when: ad_domain_check.rc != 0
+
+    - name: Get current day of the week
+      set_fact:
+        current_day: "{{ lookup('pipe', 'date +%A') }}"
+
+
+
+    - name: Construct target OU based on current day
+      set_fact:
+        target_ou: "OU=Disabled_{{ current_day }},DC=sample,DC=com"
+
+    
+
+
+
+    - name: Ensure the OU exists or create it
+      win_shell:
+        _raw_params: |
+          Import-Module ActiveDirectory
+          $ouPath = "{{ target_ou }}"
+          if (-not (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouPath'")) {
+              New-ADOrganizationalUnit -Name "Disabled_{{ current_day }}" -Path "DC=sample,DC=com"
+          }
+        args:
+          executable: powershell
+
+    - name: Check if the user exists
+      win_shell:
+        _raw_params: |
+          Import-Module ActiveDirectory
+          $user = Get-ADUser -Filter {SamAccountName -eq "{{ username }}"}
+          if ($user) { Write-Output "User exists" } else { Write-Output "User does not exist" }
+        args:
+          executable: powershell
+      register: user_exists
+      changed_when: false
+
+
+    - name: Reset user password
+      win_command: powershell.exe -Command "Set-ADAccountPassword -Identity '{{ username }}' -NewPassword (ConvertTo-SecureString -AsPlainText '{{ new_user_password }}' -Force) -Server '{{ ad_domain }}' -Reset"
+      when: user_exists.stdout_lines | length > 0
+
+    - name: Disable the AD user account
+      win_shell:
+        _raw_params: |
+          Import-Module ActiveDirectory
+          Disable-ADAccount -Identity "{{ username }}"
+        args:
+          executable: powershell
+      when: "'User exists' in user_exists.stdout"
+
+   
+
+    - name: Move the user to the target OU
+      win_shell:
+        _raw_params: |
+          Import-Module ActiveDirectory
+          $user = Get-ADUser -Filter {SamAccountName -eq "{{ username }}"}
+          Move-ADObject -Identity $user.DistinguishedName -TargetPath "{{ target_ou }}"
+        args:
+          executable: powershell
+      when: "'User exists' in user_exists.stdout"
+
+
+
+    - name: Check if log file exists
+      delegate_to: localhost
+      stat:
+        path: /tmp/disabled_users_log2.txt
+      register: log_file_stat
+
+    - name: Ensure log file exists and haas headers
+      delegate_to: localhost
+      lineinfile:
+        path: /tmp/disabled_users_log2.txt
+        create: yes
+        line: "Disabled user    OU"
+        insertafter: BOF
+      when: not log_file_stat.stat.exists
+
+    - name: Append disabled user and OU to the log file
+      delegate_to: localhost
+      lineinfile:
+        path: /tmp/disabled_users_log2.txt
+        line: "{{ '%-15s' % username }}{{  current_day }}"
+        create: yes
+        insertafter: EOF
+      when: "'User exists' in user_exists.stdout"
+
+
+
+
+
+
+
+
+
